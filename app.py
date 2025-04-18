@@ -91,15 +91,13 @@ def perform_clustering(embeddings, n_clusters):
         st.stop()
 
 # --- Search Function ---
-# The search function itself doesn't need caching unless you want to cache search results
 def find_top_n_summaries_bert(query_keywords, embeddings, df, model, n=N_TOP_SUMMARIES):
     # Convert query keywords to a vector using the BERT model
     try:
-        # Use the model parameter directly here as this function is not cached
         query_embedding = model.encode([query_keywords])[0]
     except Exception as e:
-         st.error(f"Error encoding query with BERT model: {e}")
-         return []
+        st.error(f"Error encoding query with BERT model: {e}")
+        return []
 
     # Calculate cosine similarity between query embedding and all summary embeddings
     cosine_similarities = cosine_similarity([query_embedding], embeddings)[0]
@@ -110,11 +108,10 @@ def find_top_n_summaries_bert(query_keywords, embeddings, df, model, n=N_TOP_SUM
     # Return the top N summaries and their info
     top_summaries_info = []
     for i in top_n_indices:
-        summary = df.loc[i, 'Session_Summary'] # Get original summary
-        score = cosine_similarities[i]
-        # Get the assigned cluster label using the correct column name
+        summary = df.loc[i, 'Session_Summary']  # Get original summary
+        cosine_similarity_score = cosine_similarities[i]  # Explicitly name it as cosine similarity
         cluster_label = df.loc[i, 'Cluster_Label']
-        top_summaries_info.append({'summary': summary, 'score': score, 'cluster': cluster_label})
+        top_summaries_info.append({'summary': summary, 'cosine_similarity': cosine_similarity_score, 'cluster': cluster_label})
 
     return top_summaries_info
 
@@ -149,11 +146,10 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.title("Session Summary Search App for the course DS203")
+st.title("Session Summary DS203")
 
 st.markdown("""
 Welcome! Use the search box below to find relevant session summaries based on keywords.
-The app uses BERT embeddings and KMeans clustering (total clusters = 13) to understand the content.
 """)
 # --- Load Data and Perform Initial Processing ---
 # These functions are cached, so they only run the first time or when inputs change
@@ -182,10 +178,10 @@ if st.button("Search"):
         if top_summaries:
             # Display results using expanders (simulating openable windows)
             for i, summary_info in enumerate(top_summaries):
-                # Use markdown for title to include score and cluster, and allow styling
-                expander_title = f"**Result {i+1}:** Score: {summary_info['score']:.4f}, Cluster: {summary_info['cluster']}"
+                # Use markdown for title to include cosine similarity and cluster
+                expander_title = f"**Result {i+1}:** Cosine Similarity: {summary_info['cosine_similarity']:.4f}, Cluster: {summary_info['cluster']}"
                 with st.expander(expander_title):
-                    st.write(summary_info['summary'])
+                    st.write(summary_info['summary'])  # Show the full summary
         else:
             st.info("No summaries found matching your query.")
     else:
