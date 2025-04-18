@@ -1,118 +1,204 @@
+# Import necessary libraries
 import streamlit as st
 import pandas as pd
-import numpy as np
 import re
 import nltk
 from nltk.corpus import stopwords
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer # Although not used in the final model, keep imports consistent
+from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+import os # To check for file existence
 
-# -------------------------------
-# Helper Functions and Setup
-# -------------------------------
+# --- Configuration ---
+DATA_FILE = 'Session-Summary-for-E6-project.xlsx'
+BERT_MODEL_NAME = 'all-MiniLM-L6-v2'
+N_CLUSTERS = 13 # Chosen based on evaluation
+N_TOP_SUMMARIES = 3 # Number of summaries to show in search results
 
-# Ensure the stopwords resource is available
-try:
-    nltk.data.find('corpora/stopwords')
-except LookupError:
-    nltk.download('stopwords')
+# --- NLTK Downloads (Cached) ---
+@st.cache_resource
+def download_nltk_resources():
+    try:
+        nltk.data.find('corpora/stopwords')
+    except LookupError:
+        nltk.download('stopwords')
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        nltk.download('punkt')
+    return set(stopwords.words('english'))
 
-def clean_text_simple(text):
-    """Basic text cleaning: lowercasing, removing punctuation/numbers, tokenizing, and removing stopwords."""
-    text = text.lower()
-    text = re.sub(r'[^a-z\s]', '', text)
-    words = text.split()
-    stop_words = set(stopwords.words('english'))
-    words = [word for word in words if word not in stop_words]
-    return ' '.join(words)
+stop_words = download_nltk_resources()
 
-# -------------------------------
-# Data Loading and Preprocessing
-# -------------------------------
+# --- Data Loading and Preprocessing (Cached) ---
+@st.cache_data
+def load_data(file_path):
+    if not os.path.exists(file_path):
+        st.error(f"Data file not found: {file_path}")
+        st.stop() # Stop the app if data file is missing
+    df = pd.read_excel(file_path)
+    return df
 
-# Load the data from your Excel file. Make sure the file is in the same folder as app.py,
-# or provide the correct path.
-df = pd.read_excel('Session-Summary-for-E6-project.xlsx')
+@st.cache_data
+def clean_text(df, text_col='Session_Summary'):
+    # Reuse the cleaning function developed earlier
+    def clean_text_simple(text):
+        if pd.isna(text): # Handle potential NaN values
+            return ''
+        text = str(text).lower()
+        text = re.sub(r'[^a-z\s]', '', text)
+        words = text.split()
+        # Filter stopwords and short words using the cached stop_words set
+        words = [word for word in words if word not in stop_words and len(word) > 1]
+        return ' '.join(words)
 
-# Clean the session summaries
-df['Cleaned_Summary'] = df['Session_Summary'].apply(clean_text_simple)
+    df['Cleaned_Summary'] = df[text_col].apply(clean_text_simple)
+    return df
 
-# -------------------------------
-# Text Featurization and Clustering
-# -------------------------------
+# --- Model Loading and Embedding Generation (Cached) ---
+@st.cache_resource # Use cache_resource for the model itself
+def load_bert_model(model_name):
+    try:
+        model = SentenceTransformer(model_name)
+        return model
+    except Exception as e:
+        st.error(f"Error loading BERT model: {e}")
+        st.stop()
 
-# Create TF-IDF features for the cleaned summaries
-tfidf_vectorizer = TfidfVectorizer()
-tfidf_matrix = tfidf_vectorizer.fit_transform(df['Cleaned_Summary'])
+# Corrected function signature: add leading underscore to 'model'
+@st.cache_data
+def generate_embeddings(df, _model, text_col='Cleaned_Summary'):
+    # Generate embeddings for the cleaned summaries
+    try:
+        # Use the _model parameter here
+        embeddings = _model.encode(df[text_col].tolist(), show_progress_bar=False) # show_progress_bar=False in Streamlit
+        return np.array(embeddings)
+    except Exception as e:
+        st.error(f"Error generating embeddings: {e}")
+        st.stop()
 
-# Choose the number of clusters. In your case, you've chosen 12.
-optimal_k = 13
-kmeans = KMeans(n_clusters=optimal_k, random_state=42)
-df['Cluster'] = kmeans.fit_predict(tfidf_matrix)
+# --- Clustering (Cached) ---
+@st.cache_data
+def perform_clustering(embeddings, n_clusters):
+    try:
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10) # Add n_init for KMeans
+        labels = kmeans.fit_predict(embeddings)
+        return labels
+    except Exception as e:
+        st.error(f"Error during clustering: {e}")
+        st.stop()
 
-# For ranking summaries within a cluster, compute cosine similarity between each summary
-# and its cluster's centroid.
-centroids = kmeans.cluster_centers_
-similarity_scores = []
-for idx in range(df.shape[0]):
-    cluster_label = df.loc[idx, 'Cluster']
-    summary_vec = tfidf_matrix[idx].toarray()  # convert to dense
-    centroid_vec = centroids[cluster_label].reshape(1, -1)
-    score = cosine_similarity(summary_vec, centroid_vec)[0][0]
-    similarity_scores.append(score)
-df['Similarity_Score'] = similarity_scores
+# --- Search Function ---
+# The search function itself doesn't need caching unless you want to cache search results
+def find_top_n_summaries_bert(query_keywords, embeddings, df, model, n=N_TOP_SUMMARIES):
+    # Convert query keywords to a vector using the BERT model
+    try:
+        # Use the model parameter directly here as this function is not cached
+        query_embedding = model.encode([query_keywords])[0]
+    except Exception as e:
+         st.error(f"Error encoding query with BERT model: {e}")
+         return []
 
-# Pre-compute each cluster's centroid in TF-IDF space (mean vector)
-cluster_centroids = {}
-for cluster in df['Cluster'].unique():
-    indices = df[df['Cluster'] == cluster].index
-    # Note: tfidf_matrix[indices] is a sparse matrix, so mean is computed over the dense array.
-    cluster_centroids[cluster] = tfidf_matrix[indices].mean(axis=0)
+    # Calculate cosine similarity between query embedding and all summary embeddings
+    cosine_similarities = cosine_similarity([query_embedding], embeddings)[0]
 
-def find_relevant_session(query):
+    # Get the indices of the top N summaries
+    top_n_indices = np.argsort(cosine_similarities)[::-1][:n]
+
+    # Return the top N summaries and their info
+    top_summaries_info = []
+    for i in top_n_indices:
+        summary = df.loc[i, 'Session_Summary'] # Get original summary
+        score = cosine_similarities[i]
+        # Get the assigned cluster label using the correct column name
+        cluster_label = df.loc[i, 'Cluster_Label']
+        top_summaries_info.append({'summary': summary, 'score': score, 'cluster': cluster_label})
+
+    return top_summaries_info
+
+# --- Streamlit App Layout ---
+st.markdown(
     """
-    Given a query string, find the session (cluster) that is most relevant.
-    Returns the best cluster number.
-    """
-    query_clean = clean_text_simple(query)
-    query_vec = tfidf_vectorizer.transform([query_clean])
-    scores = {}
-    for cluster, centroid in cluster_centroids.items():
-        # Convert centroid to a dense numpy array if needed.
-        centroid_dense = np.array(centroid)
-        score = cosine_similarity(query_vec, centroid_dense.reshape(1, -1))[0][0]
-        scores[cluster] = score
-    best_cluster = max(scores, key=scores.get)
-    return best_cluster, scores[best_cluster]
+    <style>
+    body {
+        background-color: #0d1b2a;
+        color: #e0e1dd;
+    }
+    .stButton>button {
+        background-color: #1b263b;
+        color: #e0e1dd;
+        border: 1px solid #415a77;
+        border-radius: 5px;
+    }
+    .stTextInput>div>div>input {
+        background-color: #1b263b;
+        color: #e0e1dd;
+        border: 1px solid #415a77;
+        border-radius: 5px;
+    }
+    .stExpander {
+        background-color: #1b263b;
+        color: #e0e1dd;
+        border: 1px solid #415a77;
+        border-radius: 5px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
-# -------------------------------
-# Streamlit App Interface
-# -------------------------------
+st.title("Session Summary Search App for the course DS203")
 
-st.title("Session Relevance Finder")
-st.write("Enter a set of keywords or a brief topic description to identify the most relevant session and view its top summaries.")
+st.markdown("""
+Welcome! Use the search box below to find relevant session summaries based on keywords.
+The app uses BERT embeddings and KMeans clustering (total clusters = 13) to understand the content.
+""")
+# --- Load Data and Perform Initial Processing ---
+# These functions are cached, so they only run the first time or when inputs change
+df = load_data(DATA_FILE)
+df = clean_text(df)
+bert_model = load_bert_model(BERT_MODEL_NAME)
+# Pass bert_model with underscore to the cached generate_embeddings function
+bert_embeddings = generate_embeddings(df, bert_model)
+cluster_labels = perform_clustering(bert_embeddings, N_CLUSTERS)
 
-# User input for query
-user_query = st.text_input("Enter keywords or description:")
+# Add cluster labels to the DataFrame for easy access in search results
+# This column name should match what's used in find_top_n_summaries_bert
+df['Cluster_Label'] = cluster_labels
 
-if user_query:
-    best_cluster, sim_score = find_relevant_session(user_query)
-    st.write(f"**Most Relevant Session (Cluster):** {best_cluster} (Cosine Similarity: {sim_score:.3f})")
-    
-    # Filter summaries from the best cluster and rank by similarity score (descending)
-    session_summaries = df[df['Cluster'] == best_cluster].sort_values(by='Similarity_Score', ascending=False)
-    
-    st.write("### Top 3 Summaries for the Selected Session:")
-    for idx, row in session_summaries.head(3).iterrows():
-        st.write(f"#### Summary {idx + 1}:")
-        st.write(f"- {row['Session_Summary']}")
-        st.write("---")  # Add a horizontal line for separation
 
-    # Alternatively, if you want to display the top summaries in an expandable 'text window':
-    with st.expander("View Detailed Top Summaries in a draggable text window"):
-        for idx, row in session_summaries.head(3).iterrows():
-            st.text(f"Summary {idx + 1} (Serial No. {row['SerialNo']}):")
-            st.text(row['Session_Summary'])
-            st.text("-" * 50)  # Add a dashed line for separation
+# --- Search Interface ---
+st.header("Search Summaries")
+query = st.text_input("Enter keywords here:", "")
 
+if st.button("Search"):
+    if query:
+        st.subheader(f"Top {N_TOP_SUMMARIES} Results for '{query}'")
+        # Pass the original bert_model object to the search function (which is not cached)
+        top_summaries = find_top_n_summaries_bert(query, bert_embeddings, df, bert_model, N_TOP_SUMMARIES)
+
+        if top_summaries:
+            # Display results using expanders (simulating openable windows)
+            for i, summary_info in enumerate(top_summaries):
+                # Use markdown for title to include score and cluster, and allow styling
+                expander_title = f"**Result {i+1}:** Score: {summary_info['score']:.4f}, Cluster: {summary_info['cluster']}"
+                with st.expander(expander_title):
+                    st.write(summary_info['summary'])
+        else:
+            st.info("No summaries found matching your query.")
+    else:
+        st.warning("Please enter some keywords to search.")
+
+
+# --- Optional: Display Cluster Info (for exploration) ---
+# You could add a section here to show info about clusters, e.g., top keywords per cluster
+# Requires implementing the get_top_frequent_terms_per_cluster function here
+# st.sidebar.header("Cluster Information")
+# if st.sidebar.checkbox("Show Cluster Details"):
+#     st.sidebar.info("Details about each cluster can be displayed here.")
+
+
+# --- Styling Customization (Hint) ---
+# st.sidebar.header("App Styling")
