@@ -109,9 +109,15 @@ def find_top_n_summaries_bert(query_keywords, embeddings, df, model, n=N_TOP_SUM
     top_summaries_info = []
     for i in top_n_indices:
         summary = df.loc[i, 'Session_Summary']  # Get original summary
+        serial_no = df.loc[i, 'SerialNo']  # Get the serial number from the file
         cosine_similarity_score = cosine_similarities[i]  # Explicitly name it as cosine similarity
         cluster_label = df.loc[i, 'Cluster_Label']
-        top_summaries_info.append({'summary': summary, 'cosine_similarity': cosine_similarity_score, 'cluster': cluster_label})
+        top_summaries_info.append({
+            'serial_no': serial_no,
+            'summary': summary,
+            'cosine_similarity': cosine_similarity_score,
+            'cluster': cluster_label
+        })
 
     return top_summaries_info
 
@@ -178,8 +184,8 @@ if st.button("Search"):
         if top_summaries:
             # Display results using expanders (simulating openable windows)
             for i, summary_info in enumerate(top_summaries):
-                # Use markdown for title to include cosine similarity and cluster
-                expander_title = f"**Result {i+1}:** Cosine Similarity: {summary_info['cosine_similarity']:.4f}, Cluster: {summary_info['cluster']}"
+                # Use markdown for title to include serial number, cosine similarity, and cluster
+                expander_title = f"**Result {i+1}:** Serial No: {summary_info['serial_no']}, Cosine Similarity: {summary_info['cosine_similarity']:.4f}, Cluster: {summary_info['cluster']}"
                 with st.expander(expander_title):
                     st.write(summary_info['summary'])  # Show the full summary
         else:
